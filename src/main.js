@@ -4,6 +4,7 @@ import { InputManager } from './InputManager.js';
 import { ChaseCamera } from './ChaseCamera.js';
 import { HUD } from './HUD.js';
 import { DebugMode } from './DebugMode.js';
+import { LocalTerrainProvider } from './LocalTerrainProvider.js';
 
 class Game {
   constructor() {
@@ -17,15 +18,19 @@ class Game {
     this.chaseCamera = null;
     this.hud = null;
     this.debugMode = null;
+    this.terrainProvider = null;
 
     // Map boundaries (3km x 3km)
     this.mapSize = 3000; // meters
     this.mapBoundary = this.mapSize / 2;
 
+    // Loading state
+    this.loading = true;
+
     this.init();
   }
 
-  init() {
+  async init() {
     // Create scene
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(0x87CEEB); // Sky blue
@@ -53,11 +58,11 @@ class Game {
     // Setup lighting
     this.setupLighting();
 
-    // Create infinite ground plane (temporary for Milestone 1)
-    this.createGroundPlane();
+    // Load terrain
+    await this.loadTerrain();
 
-    // Create glider
-    this.glider = new Glider(this.scene);
+    // Create glider (pass terrain provider for collision)
+    this.glider = new Glider(this.scene, this.terrainProvider);
 
     // Create input manager
     this.inputManager = new InputManager();
@@ -78,6 +83,9 @@ class Game {
     // Handle window resize
     window.addEventListener('resize', () => this.onResize());
 
+    // Done loading
+    this.loading = false;
+
     // Start game loop
     this.animate();
   }
@@ -89,60 +97,72 @@ class Game {
 
     // Directional light (sun)
     const sun = new THREE.DirectionalLight(0xffffff, 1.0);
-    sun.position.set(100, 200, 100);
+    sun.position.set(500, 1000, 500);
     sun.castShadow = true;
     sun.shadow.mapSize.width = 2048;
     sun.shadow.mapSize.height = 2048;
-    sun.shadow.camera.near = 10;
-    sun.shadow.camera.far = 1000;
-    sun.shadow.camera.left = -200;
-    sun.shadow.camera.right = 200;
-    sun.shadow.camera.top = 200;
-    sun.shadow.camera.bottom = -200;
+    sun.shadow.camera.near = 100;
+    sun.shadow.camera.far = 3000;
+    sun.shadow.camera.left = -1500;
+    sun.shadow.camera.right = 1500;
+    sun.shadow.camera.top = 1500;
+    sun.shadow.camera.bottom = -1500;
     this.scene.add(sun);
 
     // Hemisphere light for sky/ground color variation
-    const hemi = new THREE.HemisphereLight(0x87CEEB, 0x3a5f0b, 0.3);
+    const hemi = new THREE.HemisphereLight(0x87CEEB, 0x8B4513, 0.3);
     this.scene.add(hemi);
   }
 
-  createGroundPlane() {
-    // Large ground plane for Milestone 1
-    const groundGeometry = new THREE.PlaneGeometry(this.mapSize, this.mapSize, 64, 64);
-    const groundMaterial = new THREE.MeshStandardMaterial({
-      color: 0x3a5f0b, // Green grass color
-      roughness: 0.9,
-      metalness: 0.0
+  async loadTerrain() {
+    console.log('Loading terrain...');
+
+    // Heightmap is 5752x3016 pixels (1.9:1 aspect ratio)
+    // Grand Canyon elevation range is ~1500m (river ~600m, rim ~2100m)
+    const terrainWidth = 5700;  // meters (match aspect ratio)
+    const terrainDepth = 3000;  // meters
+
+    this.terrainProvider = new LocalTerrainProvider({
+      heightmapPath: '/maps/grand_canyon/terrain_height.png',
+      colorMapPath: '/maps/grand_canyon/terrain_color.png',
+      width: terrainWidth,
+      depth: terrainDepth,
+      maxHeight: 2000,  // Appropriate for Grand Canyon
+      segments: 256
     });
 
-    const ground = new THREE.Mesh(groundGeometry, groundMaterial);
-    ground.rotation.x = -Math.PI / 2;
-    ground.receiveShadow = true;
-    this.scene.add(ground);
+    // Update map boundaries to match terrain
+    this.mapSize = Math.max(terrainWidth, terrainDepth);
+    this.mapBoundary = this.mapSize / 2;
 
-    // Add grid helper for visual reference
-    const gridHelper = new THREE.GridHelper(this.mapSize, 60, 0x444444, 0x666666);
-    gridHelper.position.y = 0.1;
-    this.scene.add(gridHelper);
+    await this.terrainProvider.init();
 
-    // Add boundary markers
+    // Add terrain mesh to scene
+    const terrainMesh = this.terrainProvider.getMesh();
+    this.scene.add(terrainMesh);
+
+    // Add boundary markers at corners
     this.createBoundaryMarkers();
+
+    console.log('Terrain loaded!');
   }
 
   createBoundaryMarkers() {
     const markerMaterial = new THREE.MeshStandardMaterial({ color: 0xff0000 });
-    const markerGeometry = new THREE.CylinderGeometry(5, 5, 100, 8);
+    const markerGeometry = new THREE.CylinderGeometry(10, 10, 500, 8);
+    const bounds = this.terrainProvider.getBounds();
 
     const positions = [
-      { x: -this.mapBoundary, z: -this.mapBoundary },
-      { x: this.mapBoundary, z: -this.mapBoundary },
-      { x: -this.mapBoundary, z: this.mapBoundary },
-      { x: this.mapBoundary, z: this.mapBoundary }
+      { x: bounds.minX, z: bounds.minZ },
+      { x: bounds.maxX, z: bounds.minZ },
+      { x: bounds.minX, z: bounds.maxZ },
+      { x: bounds.maxX, z: bounds.maxZ }
     ];
 
     positions.forEach(pos => {
+      const groundHeight = this.terrainProvider.getHeightAt(pos.x, pos.z);
       const marker = new THREE.Mesh(markerGeometry, markerMaterial);
-      marker.position.set(pos.x, 50, pos.z);
+      marker.position.set(pos.x, groundHeight + 250, pos.z);
       this.scene.add(marker);
     });
   }
@@ -163,11 +183,12 @@ class Game {
   checkBoundaries() {
     const pos = this.glider.position;
     const buffer = 100; // Buffer zone before boundary
+    const bounds = this.terrainProvider.getBounds();
 
-    // Check if approaching boundaries
+    // Check if approaching boundaries (rectangular terrain)
     const distToEdge = {
-      x: Math.abs(pos.x) - (this.mapBoundary - buffer),
-      z: Math.abs(pos.z) - (this.mapBoundary - buffer)
+      x: Math.max(pos.x - (bounds.maxX - buffer), (bounds.minX + buffer) - pos.x),
+      z: Math.max(pos.z - (bounds.maxZ - buffer), (bounds.minZ + buffer) - pos.z)
     };
 
     if (distToEdge.x > 0 || distToEdge.z > 0) {
@@ -188,6 +209,8 @@ class Game {
 
   animate() {
     requestAnimationFrame(() => this.animate());
+
+    if (this.loading) return;
 
     const deltaTime = this.clock.getDelta();
 

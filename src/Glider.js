@@ -1,11 +1,19 @@
 import * as THREE from 'three';
 
 export class Glider {
-  constructor(scene) {
+  constructor(scene, terrainProvider = null) {
     this.scene = scene;
+    this.terrainProvider = terrainProvider;
+
+    // Spawn altitude above terrain
+    this.spawnAltitudeAboveGround = 1000; // 1000m above terrain
+
+    // Calculate initial spawn position
+    const groundHeight = terrainProvider ? terrainProvider.getHeightAt(0, 0) : 0;
+    const spawnY = groundHeight + this.spawnAltitudeAboveGround;
 
     // State
-    this.position = new THREE.Vector3(0, 1000, 0); // Start at 1000m
+    this.position = new THREE.Vector3(0, spawnY, 0);
     this.velocity = new THREE.Vector3(0, 0, -20);  // Initial forward speed (m/s)
     this.rotation = new THREE.Quaternion();
 
@@ -183,9 +191,17 @@ export class Glider {
     // Update position
     this.position.add(this.velocity.clone().multiplyScalar(deltaTime));
 
-    // Keep altitude non-negative (will be replaced by terrain collision)
-    if (this.position.y < 0) {
-      this.crash();
+    // Terrain collision detection
+    if (this.terrainProvider) {
+      const groundHeight = this.terrainProvider.getHeightAt(this.position.x, this.position.z);
+      if (this.position.y < groundHeight) {
+        this.crash();
+      }
+    } else {
+      // Fallback: check against y=0 if no terrain
+      if (this.position.y < 0) {
+        this.crash();
+      }
     }
   }
 
@@ -218,7 +234,11 @@ export class Glider {
   }
 
   reset() {
-    this.position.set(0, 1000, 0);
+    // Calculate spawn position above terrain at center
+    const groundHeight = this.terrainProvider ? this.terrainProvider.getHeightAt(0, 0) : 0;
+    const spawnY = groundHeight + this.spawnAltitudeAboveGround;
+
+    this.position.set(0, spawnY, 0);
     this.velocity.set(0, 0, -20);
     this.pitch = 0;
     this.roll = 0;
